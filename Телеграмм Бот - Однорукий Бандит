@@ -1,0 +1,189 @@
+import telebot
+import random
+import sqlite3
+import time
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# Вставьте свой токен бота
+bot = telebot.TeleBot("ВАШ ТОКЕН")
+
+# Определяем символы на барабанах и их вероятности
+symbols = ['7️⃣', '⭐', '🔔', '🍋', '🍒']
+
+# Обновленные вероятности выпадения каждого типа победы в процентах
+spin_win_probabilities = {
+    '7️⃣': {'three': 0.1, 'two': 0.5},
+    '⭐': {'three': 1.5, 'two': 2},
+    '🔔': {'three': 2, 'two': 3.2},
+    '🍋': {'three': 4, 'two': 7},
+    '🍒': {'three': 5, 'two': 15}
+}
+
+# Устанавливаем шансы на победу и проигрыш
+spin_win_chance = 0.15  # 15%
+spin_lose_chance = 0.85  # 85%
+
+# Подключаемся к базе данных (многопоточность - on, база данных SQLite, таблица dkp_score, колонки - user_id, score)
+conn = sqlite3.connect('ВАША БАЗА SQLite', check_same_thread=False)
+cursor = conn.cursor()
+
+# Словарь для хранения состояний пользователей
+spin_game_state = {}
+
+# Функция для определения исхода игры
+def spin_determine_outcome(user_id):
+    # Проверяем шанс на победу
+    if random.random() < spin_win_chance:
+        # Определяем конкретный выигрыш на основе вероятностей
+        outcome = random.choices(
+            symbols,
+            weights=[spin_win_probabilities[symbol]['three'] for symbol in symbols],
+            k=1
+        )[0]
+        # Определяем, будет ли это выигрыш из двух или трех символов
+        if random.random() < (spin_win_probabilities[outcome]['two'] / sum(spin_win_probabilities[outcome].values())):
+            return (outcome, 2, None)
+        else:
+            return (outcome, 3, None)
+    else:
+        # Шанс на проигрыш, при котором всегда три разных символа
+        while True:
+            display = random.choices(symbols, k=3)
+            if len(set(display)) == 3:
+                return (None, 0, display)
+
+@bot.message_handler(commands=['onehandbandit'])
+def spin_send_welcome(message):
+    user_id = message.from_user.id
+    
+    # Инициализация состояния для нового пользователя
+    if user_id not in spin_game_state:
+        spin_game_state[user_id] = {'win_streak': 0, 'initial_score': None}
+
+    bot.reply_to(message, "Добро пожаловать в игру! Нажмите кнопку SPIN для вращения барабанов или кнопку 'Правила' для ознакомления с игрой.", 
+                 reply_markup=spin_create_buttons("🎰 | 🎰 | 🎰"))
+
+def spin_create_buttons(display):
+    markup = InlineKeyboardMarkup()
+    spin_button = InlineKeyboardButton("🎰 SPIN", callback_data="spin")
+    rules_button = InlineKeyboardButton("📜 Правила", callback_data="rules")
+    # Добавляем игровой дисплей и кнопки SPIN и Правила
+    markup.row(InlineKeyboardButton(display, callback_data="noop"))
+    markup.row(spin_button, rules_button)
+    return markup
+
+@bot.callback_query_handler(func=lambda call: call.data == "spin")
+def spin_spin(call):
+    user_id = call.from_user.id
+    
+    # Получаем текущий счет пользователя из базы данных
+    cursor.execute("SELECT score FROM dkp_score WHERE user_id = ?", (user_id,))
+    current_score = cursor.fetchone()[0]
+
+    # Если начальный счет не установлен, запоминаем его
+    if spin_game_state[user_id]['initial_score'] is None:
+        spin_game_state[user_id]['initial_score'] = current_score
+
+    # Проверяем, если пользователь проиграл более 200 очков, даем ему выигрыш
+    if spin_game_state[user_id]['initial_score'] - current_score >= 200:
+        outcome, match_count = '⭐', 3  # Три звезды
+        spin_game_state[user_id]['initial_score'] = current_score  # Обновляем начальный счет
+    else:
+        outcome, match_count, display = spin_determine_outcome(user_id)
+
+    # Сообщение "Крутим..." и задержка в 3 секунды
+    bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id,
+                          text="Крутим...", reply_markup=None)
+    time.sleep(3)
+
+    if outcome is None:
+        points = -5  # За каждую крутку вычитаем 5 очков
+        result_text = 'Попробуйте еще раз! -5 очков.'
+        win_streak = 0  # Сброс стрика на проигрыше
+    else:
+        if match_count == 3:
+            if outcome == '7️⃣':
+                points = 500
+                result_text = 'ДЖЕКПОТ! +500 очков!'
+            elif outcome == '⭐':
+                points = 100
+                result_text = 'Вы выиграли! +100 очков.'
+            elif outcome == '🔔':
+                points = 75
+                result_text = 'Вы выиграли! +75 очков.'
+            elif outcome == '🍋':
+                points = 50
+                result_text = 'Вы выиграли! +50 очков.'
+            elif outcome == '🍒':
+                points = 10
+                result_text = 'Вы выиграли! +10 очков.'
+        elif match_count == 2:
+            if outcome == '7️⃣':
+                points = 100
+                result_text = '+100 очков за два 7️⃣!'
+            elif outcome == '⭐':
+                points = 50
+                result_text = '+50 очков за две ⭐!'
+            elif outcome == '🔔':
+                points = 25
+                result_text = '+25 очков за два 🔔!'
+            elif outcome == '🍋':
+                points = 15
+                result_text = '+15 очков за два 🍋!'
+            elif outcome == '🍒':
+                points = 5
+                result_text = '+5 очков за две 🍒!'
+        win_streak = spin_game_state[user_id]['win_streak'] + 1
+        display = [outcome] * match_count + random.choices(symbols, k=3 - match_count)
+    
+    # Обновляем win_streak в словаре
+    spin_game_state[user_id]['win_streak'] = win_streak
+    
+    # Обновляем очки пользователя в базе данных
+    cursor.execute("UPDATE dkp_score SET score = score + ? WHERE user_id = ?", (points, user_id))
+    conn.commit()
+    
+    # Выводим текущее количество очков
+    cursor.execute("SELECT score FROM dkp_score WHERE user_id = ?", (user_id,))
+    current_score = cursor.fetchone()[0]
+    score_text = f"Ваш текущий счет: {current_score} очков."
+    
+    # Обновляем дисплей и кнопку SPIN
+    bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id,
+                          text=f"{result_text}\n\n{score_text}", reply_markup=spin_create_buttons(' | '.join(display)))
+
+@bot.callback_query_handler(func=lambda call: call.data == "rules")
+def spin_show_rules(call):
+    # Полное сообщение, отправляемое как текст
+    full_rules_text = (
+        "Правила игры 'Однорукий бандит':\n\n"
+        "1. Нажмите кнопку 'SPIN', чтобы начать вращение барабанов.\n"
+        "2. Ваши очки будут начислены в зависимости от выпавших символов.\n"
+        "3. За каждый проигрыш вы теряете 5 очков.\n"
+        "4. Три одинаковых символа приносят большой выигрыш, два одинаковых символа - меньший выигрыш.\n"
+        "5. Ручка крутится 3 секунды, не стоит пытаться жать часто.\n\n"
+        "Очки за символы:\n"
+        "🔹 '7️⃣':\n"
+        "   - 3 символа: +500 очков\n"
+        "   - 2 символа: +100 очков\n"
+        "🔹 '⭐':\n"
+        "   - 3 символа: +100 очков\n"
+        "   - 2 символа: +50 очков\n"
+        "🔹 '🔔':\n"
+        "   - 3 символа: +75 очков\n"
+        "   - 2 символа: +25 очков\n"
+        "🔹 '🍋':\n"
+        "   - 3 символа: +50 очков\n"
+        "   - 2 символа: +15 очков\n"
+        "🔹 '🍒':\n"
+        "   - 3 символа: +10 очков\n"
+        "   - 2 символа: +5 очков\n\n"
+        "Алгоритм игры аналогичен настоящему однорукому бандиту, что делает игру честной и захватывающей.\n\n"
+        "Удачи в игре!"
+    )
+    
+    # Отправляем полное сообщение в чат
+    bot.send_message(call.message.chat.id, full_rules_text)
+
+# Запуск бота
+bot.polling()
